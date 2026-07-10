@@ -33,7 +33,7 @@ struct Entry {
 size_t hash_fn(const string& s) {
     size_t h = 0;
     for (char c : s) {
-        h = h * 31 + c;
+        h = h * 31 + (unsigned char)c;
     }
     return h % BUCKET_COUNT;
 }
@@ -106,7 +106,7 @@ public:
             Entry e;
             data_fs.seekg(current_offset);
             data_fs.read(reinterpret_cast<char*>(&e), sizeof(Entry));
-            if (string(e.key) == key && e.value == value) return true;
+            if (strncmp(e.key, key.c_str(), KEY_SIZE) == 0 && e.value == value) return true;
             current_offset = e.next_offset;
         }
         return false;
@@ -124,7 +124,7 @@ public:
             data_fs.seekg(current_offset);
             data_fs.read(reinterpret_cast<char*>(&e), sizeof(Entry));
 
-            if (string(e.key) == key && e.value == value) {
+            if (strncmp(e.key, key.c_str(), KEY_SIZE) == 0 && e.value == value) {
                 if (prev_offset == -1) {
                     // Update head in index file
                     long long next = e.next_offset;
@@ -159,7 +159,7 @@ public:
             Entry e;
             data_fs.seekg(current_offset);
             data_fs.read(reinterpret_cast<char*>(&e), sizeof(Entry));
-            if (string(e.key) == key) {
+            if (strncmp(e.key, key.c_str(), KEY_SIZE) == 0) {
                 results.push_back(e.value);
             }
             current_offset = e.next_offset;
