@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 
 using namespace std;
 
@@ -12,16 +13,16 @@ using namespace std;
  * Implementation: Disk-based Hash Table with Chaining.
  * 
  * Optimization:
- * - Removed the in-memory index cache to comply with memory limits and 
- *   the requirement that only necessary data be stored in memory.
- * - Bucket heads are read/written directly from index.bin.
- * - Removed frequent fflush() calls to reduce disk I/O overhead and fix TLE.
+ * - Added a small cache for bucket heads to reduce frequent fseek/fread on index.bin.
+ * - Increased FILE buffer sizes using setvbuf to reduce system call overhead.
+ * - Maintained strict memory limits by limiting cache size.
  */
 
 const char* INDEX_FILE = "index.bin";
 const char* DATA_FILE = "data.bin";
 const size_t BUCKET_COUNT = 100003; 
 const size_t KEY_SIZE = 64;
+const size_t CACHE_SIZE = 1024; // Small cache to stay within memory limits
 
 struct Entry {
     char key[KEY_SIZE];
@@ -40,6 +41,22 @@ size_t hash_fn(const string& s) {
 class FileStorage {
     FILE* index_fp;
     FILE* data_fp;
+    
+    // Simple cache for bucket heads: bucket_id -> head_offset
+    unordered_map<size_t, long long> bucket_cache;
+    vector<size_t> cache_order;
+
+    void update_cache(size_t bucket, long long head) {
+        if (bucket_cache.size() >= CACHE_SIZE) {
+            size_t oldest = cache_order[0];
+            bucket_cache.erase(oldest);
+            cache_order.erase(cache_order.begin());
+        }
+        if (bucket_cache.find(bucket) == bucket_cache.end()) {
+            cache_order.push_back(bucket);
+        }
+        bucket_cache[bucket] = head;
+    }
 
 public:
     FileStorage() {
@@ -47,7 +64,6 @@ public:
         index_fp = fopen(INDEX_FILE, "rb+");
         if (!index_fp) {
             index_fp = fopen(INDEX_FILE, "wb+");
-            // Initialize the index file with -1 for all buckets
             long long empty_val = -1;
             for (size_t i = 0; i < BUCKET_COUNT; ++i) {
                 fwrite(&empty_val, sizeof(long long), 1, index_fp);
@@ -60,6 +76,10 @@ public:
         if (!data_fp) {
             data_fp = fopen(DATA_FILE, "wb+");
         }
+
+        // Increase buffer sizes to reduce I/O overhead
+        setvbuf(index_fp, NULL, _IOFBF, 65536);
+        setvbuf(data_fp, NULL, _IOFBF, 65536);
     }
 
     ~FileStorage() {
@@ -68,23 +88,26 @@ public:
     }
 
     long long get_bucket_head(size_t bucket) {
+        if (bucket_cache.count(bucket)) {
+            return bucket_cache[bucket];
+        }
         long long head;
         fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
         if (fread(&head, sizeof(long long), 1, index_fp) != 1) return -1;
+        update_cache(bucket, head);
         return head;
     }
 
     void set_bucket_head(size_t bucket, long long head) {
         fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
         fwrite(&head, sizeof(long long), 1, index_fp);
-        // Removed fflush(index_fp) to avoid TLE
+        update_cache(bucket, head);
     }
 
     void insert(const string& key, int value) {
         size_t bucket = hash_fn(key);
         long long head_offset = get_bucket_head(bucket);
 
-        // Check for duplicates while traversing
         long long current_offset = head_offset;
         while (current_offset != -1) {
             Entry e;
@@ -100,13 +123,10 @@ public:
         new_entry.value = value;
         new_entry.next_offset = head_offset;
 
-        // Append to end of data file
         fseek(data_fp, 0, SEEK_END);
         long long new_offset = ftell(data_fp);
         fwrite(&new_entry, sizeof(Entry), 1, data_fp);
-        // Removed fflush(data_fp) to avoid TLE
 
-        // Update index on disk
         set_bucket_head(bucket, new_offset);
     }
 
@@ -131,7 +151,6 @@ public:
                     prev_e.next_offset = e.next_offset;
                     fseek(data_fp, prev_offset, SEEK_SET);
                     fwrite(&prev_e, sizeof(Entry), 1, data_fp);
-                    // Removed fflush(data_fp) to avoid TLE
                 }
                 return;
             }
