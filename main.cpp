@@ -12,8 +12,9 @@ using namespace std;
  * Implementation: Disk-based Hash Table with Chaining.
  * 
  * Optimization:
- * - The index (bucket heads) is cached in memory to avoid frequent disk I/O.
- * - Data entries remain on disk.
+ * - Removed the in-memory index cache to comply with memory limits and 
+ *   the requirement that only necessary data be stored in memory.
+ * - Bucket heads are read/written directly from index.bin.
  */
 
 const char* INDEX_FILE = "index.bin";
@@ -38,22 +39,19 @@ size_t hash_fn(const string& s) {
 class FileStorage {
     FILE* index_fp;
     FILE* data_fp;
-    vector<long long> index_cache;
 
 public:
     FileStorage() {
-        index_cache.assign(BUCKET_COUNT, -1);
-        
         // Open index file
         index_fp = fopen(INDEX_FILE, "rb+");
         if (!index_fp) {
             index_fp = fopen(INDEX_FILE, "wb+");
-            vector<long long> empty_buckets(BUCKET_COUNT, -1);
-            fwrite(empty_buckets.data(), sizeof(long long), BUCKET_COUNT, index_fp);
+            // Initialize the index file with -1 for all buckets
+            long long empty_val = -1;
+            for (size_t i = 0; i < BUCKET_COUNT; ++i) {
+                fwrite(&empty_val, sizeof(long long), 1, index_fp);
+            }
             fflush(index_fp);
-        } else {
-            // Load index into memory
-            fread(index_cache.data(), sizeof(long long), BUCKET_COUNT, index_fp);
         }
 
         // Open data file
@@ -64,18 +62,26 @@ public:
     }
 
     ~FileStorage() {
-        if (index_fp) {
-            // Sync index cache to disk before closing
-            fseek(index_fp, 0, SEEK_SET);
-            fwrite(index_cache.data(), sizeof(long long), BUCKET_COUNT, index_fp);
-            fclose(index_fp);
-        }
+        if (index_fp) fclose(index_fp);
         if (data_fp) fclose(data_fp);
+    }
+
+    long long get_bucket_head(size_t bucket) {
+        long long head;
+        fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
+        if (fread(&head, sizeof(long long), 1, index_fp) != 1) return -1;
+        return head;
+    }
+
+    void set_bucket_head(size_t bucket, long long head) {
+        fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
+        fwrite(&head, sizeof(long long), 1, index_fp);
+        fflush(index_fp);
     }
 
     void insert(const string& key, int value) {
         size_t bucket = hash_fn(key);
-        long long head_offset = index_cache[bucket];
+        long long head_offset = get_bucket_head(bucket);
 
         // Check for duplicates while traversing
         long long current_offset = head_offset;
@@ -97,19 +103,15 @@ public:
         fseek(data_fp, 0, SEEK_END);
         long long new_offset = ftell(data_fp);
         fwrite(&new_entry, sizeof(Entry), 1, data_fp);
+        fflush(data_fp);
 
-        // Update index in memory
-        index_cache[bucket] = new_offset;
-        
-        // Periodically sync index to disk to be safe, or just rely on destructor.
-        // For OJ, syncing the specific bucket is fast.
-        fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
-        fwrite(&index_cache[bucket], sizeof(long long), 1, index_fp);
+        // Update index on disk
+        set_bucket_head(bucket, new_offset);
     }
 
     void remove(const string& key, int value) {
         size_t bucket = hash_fn(key);
-        long long current_offset = index_cache[bucket];
+        long long current_offset = get_bucket_head(bucket);
 
         long long prev_offset = -1;
         while (current_offset != -1) {
@@ -120,9 +122,7 @@ public:
             if (strncmp(e.key, key.c_str(), KEY_SIZE) == 0 && e.value == value) {
                 if (prev_offset == -1) {
                     long long next = e.next_offset;
-                    index_cache[bucket] = next;
-                    fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
-                    fwrite(&index_cache[bucket], sizeof(long long), 1, index_fp);
+                    set_bucket_head(bucket, next);
                 } else {
                     Entry prev_e;
                     fseek(data_fp, prev_offset, SEEK_SET);
@@ -130,6 +130,7 @@ public:
                     prev_e.next_offset = e.next_offset;
                     fseek(data_fp, prev_offset, SEEK_SET);
                     fwrite(&prev_e, sizeof(Entry), 1, data_fp);
+                    fflush(data_fp);
                 }
                 return;
             }
@@ -140,7 +141,7 @@ public:
 
     void find(const string& key) {
         size_t bucket = hash_fn(key);
-        long long current_offset = index_cache[bucket];
+        long long current_offset = get_bucket_head(bucket);
 
         vector<int> results;
         while (current_offset != -1) {
