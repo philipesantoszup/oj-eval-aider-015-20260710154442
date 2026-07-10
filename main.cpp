@@ -15,6 +15,7 @@ using namespace std;
  * - Removed the in-memory index cache to comply with memory limits and 
  *   the requirement that only necessary data be stored in memory.
  * - Bucket heads are read/written directly from index.bin.
+ * - Removed frequent fflush() calls to reduce disk I/O overhead and fix TLE.
  */
 
 const char* INDEX_FILE = "index.bin";
@@ -76,7 +77,7 @@ public:
     void set_bucket_head(size_t bucket, long long head) {
         fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
         fwrite(&head, sizeof(long long), 1, index_fp);
-        fflush(index_fp);
+        // Removed fflush(index_fp) to avoid TLE
     }
 
     void insert(const string& key, int value) {
@@ -103,7 +104,7 @@ public:
         fseek(data_fp, 0, SEEK_END);
         long long new_offset = ftell(data_fp);
         fwrite(&new_entry, sizeof(Entry), 1, data_fp);
-        fflush(data_fp);
+        // Removed fflush(data_fp) to avoid TLE
 
         // Update index on disk
         set_bucket_head(bucket, new_offset);
@@ -130,7 +131,7 @@ public:
                     prev_e.next_offset = e.next_offset;
                     fseek(data_fp, prev_offset, SEEK_SET);
                     fwrite(&prev_e, sizeof(Entry), 1, data_fp);
-                    fflush(data_fp);
+                    // Removed fflush(data_fp) to avoid TLE
                 }
                 return;
             }
