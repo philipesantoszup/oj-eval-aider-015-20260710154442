@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <fstream>
+#include <cstdio>
 #include <cstring>
 
 using namespace std;
@@ -19,8 +19,8 @@ using namespace std;
  * [Key (64 bytes)] [Value (4 bytes)] [NextOffset (8 bytes)]
  */
 
-const string INDEX_FILE = "index.bin";
-const string DATA_FILE = "data.bin";
+const char* INDEX_FILE = "index.bin";
+const char* DATA_FILE = "data.bin";
 const size_t BUCKET_COUNT = 100003; // Prime number for hash distribution
 const size_t KEY_SIZE = 64;
 
@@ -39,44 +39,48 @@ size_t hash_fn(const string& s) {
 }
 
 class FileStorage {
-    fstream index_fs;
-    fstream data_fs;
+    FILE* index_fp;
+    FILE* data_fp;
 
 public:
     FileStorage() {
-        // Open index file: read/write, binary
-        index_fs.open(INDEX_FILE, ios::in | ios::out | ios::binary);
-        if (!index_fs) {
-            index_fs.open(INDEX_FILE, ios::out | ios::binary);
+        // Open index file
+        index_fp = fopen(INDEX_FILE, "rb+");
+        if (!index_fp) {
+            index_fp = fopen(INDEX_FILE, "wb+");
             vector<long long> empty_buckets(BUCKET_COUNT, -1);
-            index_fs.write(reinterpret_cast<char*>(empty_buckets.data()), BUCKET_COUNT * sizeof(long long));
-            index_fs.close();
-            index_fs.open(INDEX_FILE, ios::in | ios::out | ios::binary);
+            fwrite(empty_buckets.data(), sizeof(long long), BUCKET_COUNT, index_fp);
+            fflush(index_fp);
         }
 
-        // Open data file: read/write, binary
-        data_fs.open(DATA_FILE, ios::in | ios::out | ios::binary);
-        if (!data_fs) {
-            data_fs.open(DATA_FILE, ios::out | ios::binary);
-            data_fs.close();
-            data_fs.open(DATA_FILE, ios::in | ios::out | ios::binary);
+        // Open data file
+        data_fp = fopen(DATA_FILE, "rb+");
+        if (!data_fp) {
+            data_fp = fopen(DATA_FILE, "wb+");
         }
     }
 
     ~FileStorage() {
-        if (index_fs.is_open()) index_fs.close();
-        if (data_fs.is_open()) data_fs.close();
+        if (index_fp) fclose(index_fp);
+        if (data_fp) fclose(data_fp);
     }
 
     void insert(const string& key, int value) {
         size_t bucket = hash_fn(key);
         
-        // Check if (key, value) already exists to prevent duplicates
-        if (exists(key, value)) return;
-
         long long head_offset;
-        index_fs.seekg(bucket * sizeof(long long));
-        index_fs.read(reinterpret_cast<char*>(&head_offset), sizeof(long long));
+        fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
+        fread(&head_offset, sizeof(long long), 1, index_fp);
+
+        // Check for duplicates while traversing
+        long long current_offset = head_offset;
+        while (current_offset != -1) {
+            Entry e;
+            fseek(data_fp, current_offset, SEEK_SET);
+            fread(&e, sizeof(Entry), 1, data_fp);
+            if (strncmp(e.key, key.c_str(), KEY_SIZE) == 0 && e.value == value) return;
+            current_offset = e.next_offset;
+        }
 
         Entry new_entry;
         memset(new_entry.key, 0, KEY_SIZE);
@@ -85,62 +89,40 @@ public:
         new_entry.next_offset = head_offset;
 
         // Append to end of data file
-        data_fs.seekp(0, ios::end);
-        long long new_offset = data_fs.tellp();
-        data_fs.write(reinterpret_cast<char*>(&new_entry), sizeof(Entry));
+        fseek(data_fp, 0, SEEK_END);
+        long long new_offset = ftell(data_fp);
+        fwrite(&new_entry, sizeof(Entry), 1, data_fp);
 
         // Update index
-        index_fs.seekp(bucket * sizeof(long long));
-        index_fs.write(reinterpret_cast<char*>(&new_offset), sizeof(long long));
-        index_fs.flush();
-        data_fs.flush();
-    }
-
-    bool exists(const string& key, int value) {
-        size_t bucket = hash_fn(key);
-        long long current_offset;
-        index_fs.seekg(bucket * sizeof(long long));
-        index_fs.read(reinterpret_cast<char*>(&current_offset), sizeof(long long));
-
-        while (current_offset != -1) {
-            Entry e;
-            data_fs.seekg(current_offset);
-            data_fs.read(reinterpret_cast<char*>(&e), sizeof(Entry));
-            if (strncmp(e.key, key.c_str(), KEY_SIZE) == 0 && e.value == value) return true;
-            current_offset = e.next_offset;
-        }
-        return false;
+        fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
+        fwrite(&new_offset, sizeof(long long), 1, index_fp);
     }
 
     void remove(const string& key, int value) {
         size_t bucket = hash_fn(key);
         long long current_offset;
-        index_fs.seekg(bucket * sizeof(long long));
-        index_fs.read(reinterpret_cast<char*>(&current_offset), sizeof(long long));
+        fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
+        fread(&current_offset, sizeof(long long), 1, index_fp);
 
         long long prev_offset = -1;
         while (current_offset != -1) {
             Entry e;
-            data_fs.seekg(current_offset);
-            data_fs.read(reinterpret_cast<char*>(&e), sizeof(Entry));
+            fseek(data_fp, current_offset, SEEK_SET);
+            fread(&e, sizeof(Entry), 1, data_fp);
 
             if (strncmp(e.key, key.c_str(), KEY_SIZE) == 0 && e.value == value) {
                 if (prev_offset == -1) {
-                    // Update head in index file
                     long long next = e.next_offset;
-                    index_fs.seekp(bucket * sizeof(long long));
-                    index_fs.write(reinterpret_cast<char*>(&next), sizeof(long long));
+                    fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
+                    fwrite(&next, sizeof(long long), 1, index_fp);
                 } else {
-                    // Update previous entry's next pointer
                     Entry prev_e;
-                    data_fs.seekp(prev_offset);
-                    data_fs.read(reinterpret_cast<char*>(&prev_e), sizeof(Entry));
+                    fseek(data_fp, prev_offset, SEEK_SET);
+                    fread(&prev_e, sizeof(Entry), 1, data_fp);
                     prev_e.next_offset = e.next_offset;
-                    data_fs.seekp(prev_offset);
-                    data_fs.write(reinterpret_cast<char*>(&prev_e), sizeof(Entry));
+                    fseek(data_fp, prev_offset, SEEK_SET);
+                    fwrite(&prev_e, sizeof(Entry), 1, data_fp);
                 }
-                index_fs.flush();
-                data_fs.flush();
                 return;
             }
             prev_offset = current_offset;
@@ -151,14 +133,14 @@ public:
     void find(const string& key) {
         size_t bucket = hash_fn(key);
         long long current_offset;
-        index_fs.seekg(bucket * sizeof(long long));
-        index_fs.read(reinterpret_cast<char*>(&current_offset), sizeof(long long));
+        fseek(index_fp, bucket * sizeof(long long), SEEK_SET);
+        fread(&current_offset, sizeof(long long), 1, index_fp);
 
         vector<int> results;
         while (current_offset != -1) {
             Entry e;
-            data_fs.seekg(current_offset);
-            data_fs.read(reinterpret_cast<char*>(&e), sizeof(Entry));
+            fseek(data_fp, current_offset, SEEK_SET);
+            fread(&e, sizeof(Entry), 1, data_fp);
             if (strncmp(e.key, key.c_str(), KEY_SIZE) == 0) {
                 results.push_back(e.value);
             }
@@ -166,38 +148,35 @@ public:
         }
 
         if (results.empty()) {
-            cout << "null" << endl;
+            printf("null\n");
         } else {
             sort(results.begin(), results.end());
             for (size_t i = 0; i < results.size(); ++i) {
-                cout << results[i] << (i == results.size() - 1 ? "" : " ");
+                printf("%d%c", results[i], (i == results.size() - 1 ? '\n' : ' '));
             }
-            cout << endl;
         }
     }
 };
 
 int main() {
-    ios_base::sync_with_stdio(false);
-    cin.tie(NULL);
-
     int n;
-    if (!(cin >> n)) return 0;
+    if (scanf("%d", &n) != 1) return 0;
 
     FileStorage fs;
-    string cmd, key;
+    char cmd[20], key[100];
     int val;
 
     for (int i = 0; i < n; ++i) {
-        cin >> cmd;
-        if (cmd == "insert") {
-            cin >> key >> val;
+        if (scanf("%s", cmd) != 1) break;
+        string cmd_str(cmd);
+        if (cmd_str == "insert") {
+            scanf("%s %d", key, &val);
             fs.insert(key, val);
-        } else if (cmd == "delete") {
-            cin >> key >> val;
+        } else if (cmd_str == "delete") {
+            scanf("%s %d", key, &val);
             fs.remove(key, val);
-        } else if (cmd == "find") {
-            cin >> key;
+        } else if (cmd_str == "find") {
+            scanf("%s", key);
             fs.find(key);
         }
     }
